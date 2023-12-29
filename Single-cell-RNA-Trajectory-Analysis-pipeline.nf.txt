@@ -1,0 +1,111 @@
+#!/usr/bin/env nextflow
+// Ensure that you have the necessary software (Cell Ranger, Seurat, Monocle, Stream) installed and properly configured in your environment like Terra.
+
+
+// Define input parameters
+params.input_dir = 'path/to/your/single_cell_data'
+params.output_dir = 'path/to/your/output'
+params.reference_genome = 'path/to/your/reference/genome.fasta'
+params.cellranger_transcriptome = 'path/to/your/cellranger_transcriptome'
+params.cluster_resolution = 0.6
+params.trajectory_method = 'DDRTree'
+params.stream_embedding_dim = 2
+
+// Create a Channel for input data
+input_ch = Channel.fromPath("${params.input_dir}/*_R1.fastq.gz")
+
+// Nextflow process for preprocessing using Cell Ranger
+process cellranger_preprocess {
+    input:
+    file(read) from input_ch
+
+    output:
+    file("${params.output_dir}/${read.baseName}_outs/filtered_gene_bc_matrices_mex/h5.h5") into cellranger_output
+
+    script:
+    """
+    cellranger count --id=${read.baseName} --transcriptome=${params.cellranger_transcriptome} --fastqs=${params.input_dir} --expect-cells=5000
+    """
+}
+
+// Nextflow process for clustering and visualization using Seurat
+process seurat_cluster_visualize {
+    input:
+    file(seurat_object) from cellranger_output
+
+    script:
+    """
+    # Load required R libraries
+    library(Seurat)
+
+    # Read the Cell Ranger output
+    seurat_object <- Read10X(data.dir = "${seurat_object}")
+
+    # Perform preprocessing and clustering
+    seurat_object <- CreateSeuratObject(counts = seurat_object, project = "YourProjectName")
+    seurat_object <- SCTransform(seurat_object)
+    seurat_object <- FindNeighbors(seurat_object, resolution = ${params.cluster_resolution})
+    seurat_object <- FindClusters(seurat_object)
+
+    # Visualize the results (UMAP plot)
+    UMAP_plot <- DimPlot(seurat_object, group.by = "seurat_clusters", save = '_seurat_umap.png')
+    """
+}
+
+// Nextflow process for trajectory analysis using Monocle2
+process monocle_trajectory {
+    input:
+    file(seurat_object) from cellranger_output
+
+    output:
+    file("${params.output_dir}/monocle_result.rds") into trajectory_result
+
+    script:
+    """
+    # Load required R libraries
+    library(monocle)
+
+    # Read the Seurat object
+    seurat_object <- Read10X(data.dir = "${seurat_object}")
+
+    # Convert to a SingleCellExperiment object
+    sce <- Seurat::as.SingleCellExperiment(seurat_object)
+
+    # Perform trajectory analysis
+    cds <- preprocessCDS(sce)
+    cds <- reduceDimension(cds, method = "${params.trajectory_method}")
+    cds <- orderCells(cds)
+
+    # Save the Monocle result
+    saveRDS(cds, file = "${params.output_dir}/monocle_result.rds")
+    """
+}
+
+// Nextflow process for interactive visualization using Stream
+process stream_visualization {
+    input:
+    file(monocle_result) from trajectory_result
+
+    script:
+    """
+    # Load required R libraries
+    library(Stream)
+
+    # Read the Monocle result
+    cds <- readRDS("${monocle_result}")
+
+    # Visualize the results using Stream
+    stream_plot <- plot_cells(cds, dimen = ${params.stream_embedding_dim})
+    ggsave("_stream_plot.png", plot = stream_plot)
+    """
+}
+
+// Define the workflow
+workflow {
+    cellranger_preprocess
+    seurat_cluster_visualize
+    monocle_trajectory
+    stream_visualization
+}
+
+// Add additional configuration settings if needed
